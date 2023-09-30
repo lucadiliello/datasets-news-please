@@ -1,33 +1,33 @@
 import datetime
 import logging
 import os
+import warnings
 from argparse import ArgumentParser, Namespace
-from functools import partial
-from multiprocessing import Pool, cpu_count
 from typing import Dict, Generator, List
 
-from datasets import Dataset
+from datasets import Dataset, disable_caching
+from multiprocess import current_process
+from newsplease.crawler.commoncrawl_crawler import __get_remote_index
 from tqdm import tqdm
 
 from datasets_news_please.extractor import IterableCommonCrawlExtractor
-from datasets_news_please.utils import get_remote_index
 
+
+os.environ['REUSE_DATASET_IF_EXISTS'] = '0'
 
 # logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('datasets_news_please')
 
-# makes other loggers quiet
-logging.getLogger('requests').setLevel(logging.CRITICAL)
-logging.getLogger('readability').setLevel(logging.CRITICAL)
-logging.getLogger('PIL').setLevel(logging.CRITICAL)
-logging.getLogger('newspaper').setLevel(logging.CRITICAL)
-logging.getLogger('newsplease').setLevel(logging.CRITICAL)
-logging.getLogger('urllib3').setLevel(logging.CRITICAL)
-logging.getLogger('jieba').setLevel(logging.CRITICAL)
-
+# suppress all warning from BeautifoulSoup and others
+warnings.filterwarnings("ignore")
 
 DEFAULT_TEMP_DIR = '/tmp/datasets_news_please/'
+LOGGING_STR_TO_ID = dict(
+    debug=logging.DEBUG,
+    info=logging.INFO,
+    warning=logging.WARNING,
+    error=logging.ERROR,
+)
 
 
 def extraction_function(
@@ -39,11 +39,12 @@ def extraction_function(
     language: str = 'en',
     strict_date: bool = False,
     temporary_directory: str = DEFAULT_TEMP_DIR,
-) -> List[Dict]:
+    process_id: int = 0,
+) -> Generator[Dict, None, None]:
     r""" Extract a single warc files and return results as a list of dictionaries. """
 
-    commoncrawl_extractor = IterableCommonCrawlExtractor()
-    commoncrawl_extractor.extract_from_commoncrawl(
+    commoncrawl_extractor = IterableCommonCrawlExtractor(temporary_directory, process_id)
+    yield from commoncrawl_extractor.extract_from_commoncrawl(
         warc_path,
         include_hosts=include_hosts,
         exclude_hosts=exclude_hosts,
@@ -51,7 +52,6 @@ def extraction_function(
         end_date=end_date,
         language=language,
         strict_date=strict_date,
-        temporary_directory=temporary_directory,
     )
 
 
@@ -59,36 +59,28 @@ def processor(warc_paths: List[str] = [], **kwargs) -> Generator[Dict, None, Non
     r""" Takes a list of warc files. Start multiprocessing pool, update a progress bar
     and returns an iterable of dictionaries containing the new articles examples. """
     # run the crawler in the current, single process if number of extraction processes is set to 1
-    extraction_fn = partial(extraction_function, **kwargs)
+    process = current_process()._identity
+    process_id = process[0] if len(process) > 0 else 0
 
-    stats = dict(
-        counter_article_passed=0,
-        counter_article_discarded=0,
-        counter_article_error=0,
-        counter_article_total=0,
-        counter_warc_skipped=0,
-        counter_warc_processed=0,
-    )
+    # position progress bar on top of all extraction processes
+    position = process_id + 1
 
-    general_progress_bar = tqdm(desc='Total progress', total=len(warc_paths), unit='warcs', smoothing=0.2, position=1)
-    with Pool(args.num_workers) as extraction_process_pool:
-        for results, new_stats in extraction_process_pool.imap(extraction_fn, warc_paths, chunksize=None):
-            general_progress_bar.update(1)
+    for warc_path in tqdm(
+        warc_paths,
+        desc=f'Progress {process_id}',
+        unit='warcs',
+        smoothing=0.2,
+        position=position,
+    ):
+        yield from extraction_function(warc_path, **kwargs, process_id=process_id)
 
-            # update general statistics
-            for k, v in new_stats.items():
-                stats[k] += v
-
-            # yield results
-            yield from results
-
-    logger.info('Processing finished...')
-    logger.info('Statistics:')
-    for k, v in stats.items():
-        logger.info(f'- {k}: {v}')
+    logger.info(f'Processor {process_id} finished successfully...')
 
 
 def main(args: Namespace):
+
+    # setting log level
+    logger.setLevel(LOGGING_STR_TO_ID[args.logging_level])
 
     logger.info('Starting Datasets CC-News Extractor...')
     logger.info(f'Temporary download directory for warc files: {args.temp_warc_dir}')
@@ -103,20 +95,27 @@ def main(args: Namespace):
     warc_end_date = datetime.datetime.strptime(args.warc_end_date, '%Y-%m-%d') if args.warc_end_date else None
 
     logger.info('Getting listing of WARC files.')
-    cc_news_crawl_names = get_remote_index(warc_start_date, warc_end_date)
+    cc_news_crawl_names = __get_remote_index(warc_files_start_date=warc_start_date, warc_files_end_date=warc_end_date)[:2]
     number_of_warc_files_on_cc = len(cc_news_crawl_names)
     logger.info(f'Found {number_of_warc_files_on_cc} WARC files.')
 
     logger.info(f'Creating extraction process pool with {args.num_workers} processes...')
     logger.info('Starting dataset generation...')
 
+    # need tuple to avoid datasets generator from splitting it over processes
+    if args.include_hosts is not None:
+        args.include_hosts = tuple(args.include_hosts)
+    if args.exclude_hosts is not None:
+        args.exclude_hosts = tuple(args.exclude_hosts)
+
+    disable_caching()
     dataset = Dataset.from_generator(
-        cc_news_crawl_names,
+        processor,
         keep_in_memory=False,
         gen_kwargs=dict(
             warc_paths=cc_news_crawl_names,
             include_hosts=args.include_hosts,
-            exclude_hosts=args.exlude_hosts,
+            exclude_hosts=args.exclude_hosts,
             start_date=article_start_date,
             end_date=article_end_date,
             language=args.language,
@@ -155,6 +154,7 @@ if __name__ == "__main__":
     parser.add_argument('--language', type=str, required=False, default=None)
 
     # mixed arguments
-    parser.add_argument('--num_workers', type=int, required=False, default=cpu_count())
+    parser.add_argument('--num_workers', type=int, required=False, default=None)
+    parser.add_argument('--logging_level', type=str, default='info', choices=('info', 'debug', 'warning', 'error'))
     args = parser.parse_args()
     main(args)
