@@ -3,7 +3,8 @@ import logging
 import os
 import sys
 from typing import Dict, Generator, List
-
+import jieba
+import boto3
 from newsplease.crawler.commoncrawl_extractor import EmptyResponseError, configure_logging
 from tqdm import tqdm
 from warcio.archiveiterator import ArchiveIterator
@@ -28,6 +29,10 @@ logging.getLogger('PIL').setLevel(logging.CRITICAL)
 logging.getLogger('newspaper').setLevel(logging.CRITICAL)
 logging.getLogger('newsplease').setLevel(logging.CRITICAL)
 logging.getLogger('urllib3').setLevel(logging.CRITICAL)
+logging.getLogger('fsspec.local').setLevel(logging.CRITICAL)
+jieba.setLogLevel(logging.CRITICAL)
+boto3.set_stream_logger('botocore', logging.CRITICAL)
+boto3.set_stream_logger('boto3', logging.CRITICAL)
 
 
 class IterableCommonCrawlExtractor:
@@ -120,17 +125,16 @@ class IterableCommonCrawlExtractor:
         r""" Iterates all transactions in one WARC file and for each transaction tries to extract an article object.
         Returns a generator of newly extracted documents. """
     
-        counter = 0
         position = self.process_id + 1
 
         with open(path_name, 'rb') as stream:
             for record in tqdm(
-                ArchiveIterator(stream), desc=f"Extraction {self.process_id}", unit="articles", position=position
+                ArchiveIterator(stream),
+                desc=f"Extraction {self.process_id}",
+                unit="articles",
+                position=position,
+                disable=True,
             ):
-                counter += 1
-                if counter >= 100:
-                    break
-
                 try:
                     if record.rec_type == 'response':
                         # if the article passes filter tests, we notify the user
@@ -167,7 +171,7 @@ class IterableCommonCrawlExtractor:
                     logger.debug(sys.exc_info()[2], exc_info=True)
 
         # cleanup
-        logging.debug(f'removing fully extracted warc {path_name}')
+        logger.debug(f'removing fully extracted warc {path_name}')
         os.remove(path_name)
 
     def extract_from_commoncrawl(

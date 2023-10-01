@@ -95,9 +95,8 @@ def main(args: Namespace):
     warc_end_date = datetime.datetime.strptime(args.warc_end_date, '%Y-%m-%d') if args.warc_end_date else None
 
     logger.info('Getting listing of WARC files.')
-    cc_news_crawl_names = __get_remote_index(warc_files_start_date=warc_start_date, warc_files_end_date=warc_end_date)[:2]
-    number_of_warc_files_on_cc = len(cc_news_crawl_names)
-    logger.info(f'Found {number_of_warc_files_on_cc} WARC files.')
+    cc_news_crawl_names = __get_remote_index(warc_files_start_date=warc_start_date, warc_files_end_date=warc_end_date)
+    logger.info(f'Found {len(cc_news_crawl_names)} WARC files.')
 
     logger.info(f'Creating extraction process pool with {args.num_workers} processes...')
     logger.info('Starting dataset generation...')
