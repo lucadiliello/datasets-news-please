@@ -28,4 +28,4 @@ List of all arguments:
 
 ## Credits
 
-This project is an adaptation of the original [news-please](https://github.com/fhamborg/news-please) framework by @fhamborg.
+This project is an adaptation of the original [news-please](https://github.com/fhamborg/news-please) framework by [fhamborg](https://github.com/fhamborg).
