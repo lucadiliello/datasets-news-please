@@ -5,7 +5,7 @@ import warnings
 from argparse import ArgumentParser, Namespace
 from typing import Dict, Generator, List
 
-from datasets import Dataset, disable_caching
+from datasets import Dataset  # , disable_caching
 from multiprocess import current_process
 from newsplease.crawler.commoncrawl_crawler import __get_remote_index
 from tqdm import tqdm
@@ -107,7 +107,7 @@ def main(args: Namespace):
     if args.exclude_hosts is not None:
         args.exclude_hosts = tuple(args.exclude_hosts)
 
-    disable_caching()
+    # disable_caching()
     dataset = Dataset.from_generator(
         processor,
         keep_in_memory=False,
