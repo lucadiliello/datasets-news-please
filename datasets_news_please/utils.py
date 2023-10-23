@@ -164,12 +164,11 @@ def download(
     r""" Download and save a file locally. """
     local_filename = urllib.parse.quote_plus(path)
     local_filepath = os.path.join(temporary_directory, local_filename)
+    local_filepath_tmp = os.path.join(temporary_directory, f"{local_filename}.temp")
 
-    # cleanup
-    try:
-        os.remove(local_filepath)
-    except OSError:
-        pass
+    # return if file already downloaded successfully
+    if os.path.exists(local_filepath):
+        return local_filepath
 
     while True:
 
@@ -177,20 +176,20 @@ def download(
 
             if s3_client is not None:
                 logger.info(f"Downloading file {path} to {local_filepath} with S3")
-                with open(local_filepath, 'wb') as file_obj:
+                with open(local_filepath_tmp, 'wb') as file_obj:
                     s3_client.download_fileobj(bucket_name, path, file_obj)
 
             else:
                 # download
                 url = f"{CC_BASE_URL}/{path}"
-                logger.info(f'Downloading {path} to {local_filepath} with HTTPS')
+                logger.info(f'Downloading {path} to {local_filepath_tmp} with HTTPS')
 
                 response = requests.get(url, stream=True)
                 total_size_in_bytes = response.headers.get('content-length', None)
                 total_size_in_bytes = int(total_size_in_bytes) if total_size_in_bytes is not None else total_size_in_bytes
 
-                with DownloadProgress(total_size_in_bytes, local_filepath, position=position) as prog_bar:
-                    with open(local_filepath, 'wb') as fo:
+                with DownloadProgress(total_size_in_bytes, position=position) as prog_bar:
+                    with open(local_filepath_tmp, 'wb') as fo:
                         for data in response.iter_content(16 * 1024 * 1024):
                             prog_bar(len(data))
                             fo.write(data)
@@ -198,12 +197,14 @@ def download(
                 if response.status_code != 200:
                     raise Exception(f'Not OK status code received: {response.status_code}')
 
-        except Exception as e:
-            logger.warning(e)
-            logger.warning(f"A connection error occurred for URL {url}, retrying in {retry_time} seconds...")
+        except Exception:
+            logger.exception(f"A connection error occurred for URL {url}, retrying in {retry_time} seconds...")
             time.sleep(retry_time)
         else:
             break
+    
+    logging.debug("Moving completed temporary file to final location and name.")
+    os.rename(local_filepath_tmp, local_filepath)
 
-    logger.info(f'Download completed, local file: {local_filepath}')
+    logger.info(f'Download completed, local file: {local_filename}')
     return local_filepath
