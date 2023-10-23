@@ -8,8 +8,10 @@ import boto3
 from newsplease.crawler.commoncrawl_extractor import EmptyResponseError, configure_logging
 from tqdm import tqdm
 from warcio.archiveiterator import ArchiveIterator
+import botocore
 
 from datasets_news_please.utils import (
+    CC_BASE_BUCKET,
     download,
     from_warc,
     get_publishing_date,
@@ -30,6 +32,7 @@ logging.getLogger('newspaper').setLevel(logging.CRITICAL)
 logging.getLogger('newsplease').setLevel(logging.CRITICAL)
 logging.getLogger('urllib3').setLevel(logging.CRITICAL)
 logging.getLogger('fsspec.local').setLevel(logging.CRITICAL)
+logging.getLogger('s3transfer').setLevel(logging.CRITICAL)
 jieba.setLogLevel(logging.CRITICAL)
 boto3.set_stream_logger('botocore', logging.CRITICAL)
 boto3.set_stream_logger('boto3', logging.CRITICAL)
@@ -50,12 +53,28 @@ class IterableCommonCrawlExtractor:
     filter_end_date = None
     filter_strict_date = True
 
-    def __init__(self, temporary_directory: str = None, process_id: int = None):
+    # fetch images (may take a lot of space)
+    fetch_images = False
+
+    # limit extracted articles for debugging
+    limit = None
+
+    def __init__(self, temporary_directory: str = None, process_id: int = None, bucket_name: str = CC_BASE_BUCKET):
         r""" Crawl and extract articles form the news crawl provided by commoncrawl.org. """
 
         self.temporary_directory = temporary_directory
         os.makedirs(self.temporary_directory, exist_ok=True)
         self.process_id = process_id
+        self.bucket_name = bucket_name
+
+        s3_client = boto3.client('s3')
+        # Verify access to commoncrawl bucket
+        try:
+            s3_client.head_bucket(Bucket=self.bucket_name)
+            self.s3_client = s3_client
+        except (botocore.exceptions.ClientError, botocore.exceptions.NoCredentialsError):
+            logger.info(f'Failed to read {self.bucket_name} bucket, using monthly WARC file listings')
+            self.s3_client = None
 
     def filter_record(self, warc_record, article=None):
         r"""
@@ -92,7 +111,7 @@ class IterableCommonCrawlExtractor:
         # filter by date
         if self.filter_start_date or self.filter_end_date:
             if not article:
-                article = from_warc(warc_record)
+                article = from_warc(warc_record, fetch_images=self.fetch_images)
 
             publishing_date = get_publishing_date(warc_record, article)
             if not publishing_date:
@@ -108,7 +127,7 @@ class IterableCommonCrawlExtractor:
         # filter on language
         if self.filter_on_language is not None:
             if not article:
-                article = from_warc(warc_record)
+                article = from_warc(warc_record, fetch_images=self.fetch_images)
             original_language = get_publishing_language(warc_record, article)
 
             if not original_language:
@@ -128,8 +147,8 @@ class IterableCommonCrawlExtractor:
         position = self.process_id + 1
 
         with open(path_name, 'rb') as stream:
-            for record in tqdm(
-                ArchiveIterator(stream),
+            for index, record in tqdm(
+                enumerate(ArchiveIterator(stream)),
                 desc=f"Extraction {self.process_id}",
                 unit="articles",
                 position=position,
@@ -147,7 +166,7 @@ class IterableCommonCrawlExtractor:
                         if filter_pass:
                             try:
                                 if not article:
-                                    article = from_warc(record)
+                                    article = from_warc(record, fetch_images=self.fetch_images)
                             except (UnicodeDecodeError, EmptyResponseError):
                                 filter_pass = False
 
@@ -167,8 +186,12 @@ class IterableCommonCrawlExtractor:
                                 logger.debug(f'article discard ({record.rec_headers.get_header("WARC-Target-URI")})')
 
                 except:  # noqa E722
-                    logger.debug(f'Unexpected error extracting article: {sys.exc_info()[0]} ({sys.exc_info()[1]})')
-                    logger.debug(sys.exc_info()[2], exc_info=True)
+                    logger.warning(f'Unexpected error extracting article: {sys.exc_info()[0]} ({sys.exc_info()[1]})')
+                    logger.warning(sys.exc_info()[2], exc_info=True)
+
+                finally:
+                    if self.limit is not None and index >= self.limit:
+                        break
 
         # cleanup
         logger.debug(f'removing fully extracted warc {path_name}')
@@ -183,6 +206,8 @@ class IterableCommonCrawlExtractor:
         end_date: datetime.datetime = None,
         language: str = 'en',
         strict_date: bool = False,
+        fetch_images: bool = False,
+        limit: int = None,
     ) -> Generator[Dict, None, None]:
         r""" Crawl and extract articles form the news crawl provided by commoncrawl.org. """
         self.warc_path = warc_path
@@ -194,5 +219,15 @@ class IterableCommonCrawlExtractor:
         self.filter_on_language = language
         self.filter_strict_date = strict_date
 
-        local_path_name = download(self.warc_path, self.temporary_directory, position=self.process_id + 1)
+        self.fetch_images = fetch_images
+
+        self.limit = limit
+
+        local_path_name = download(
+            self.warc_path,
+            self.temporary_directory,
+            position=self.process_id + 1,
+            s3_client=self.s3_client,
+            bucket_name=self.bucket_name,
+        )
         yield from self.process_warc_gz_file(local_path_name)
